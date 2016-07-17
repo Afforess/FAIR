@@ -11,8 +11,16 @@ remote.add_interface("FAIR", {
         return global.fair_rates[resource_name]
     end,
 
+    get_all_resource_fair_ratios = function()
+        return global.fair_rates
+    end,
+
+    get_resource_desired_amount = function(surface, resource_name)
+        return resource_desired_amt(surface, resource_name)
+    end,
+
     get_resource_amount = function(resource_name)
-        return global.resources[resource_name]
+        return get_resource_amount(resource_name)
     end,
 
     set_resource_amount = function(resource_name, amount)

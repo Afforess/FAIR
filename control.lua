@@ -1,14 +1,17 @@
 require 'config'
 require 'lib/util'
 require 'stdlib/area/area'
+require 'stdlib/area/chunk'
 require 'stdlib/area/position'
 require 'stdlib/area/tile'
 require 'stdlib/event/event'
 require 'stdlib/log/logger'
 require 'stdlib/table'
+require 'remote'
 
 LOGGER = Logger.new("FAIR", 'main', true)
 local Log = function(str, ...) LOGGER.log(string.format(str, ...)) end
+MOD_VERSION = 1
 
 Event.register({Event.core_events.init, Event.core_events.configuration_changed}, function(event)
     Log("Setting up F.A.I.R...")
@@ -19,9 +22,24 @@ Event.register({Event.core_events.init, Event.core_events.configuration_changed}
     if not global.fair_rates then
         global.fair_rates = {}
     end
+    if not global.resources then
+        global.resources = {}
+    end
     for resource_name, ratios in pairs(CONFIG.fair_ratios) do
         global.fair_rates[resource_name] = ratios
     end
+
+    if not global.mod_version then
+        global.mod_version = 0
+    end
+    if global.mod_version < MOD_VERSION then
+        local nauvis = game.surfaces.nauvis
+        for chunk in nauvis.get_chunks() do
+            local chunk_area = Chunk.to_area(chunk)
+            analyze_area(nauvis, chunk_area)
+        end
+    end
+
     Log("F.A.I.R setup complete.")
 end)
 
@@ -32,15 +50,19 @@ Event.register(defines.events.on_chunk_generated, function(event)
     Event.register(defines.events.on_tick, function(event)
         Event.remove(defines.events.on_tick, event._handler)
 
-        local resources = surface.find_entities_filtered({area = area, type = 'resource'})
-        table.each(resources, increment_resource)
-        increment_tiles(area)
-
-        if #resources > 0 and global.tiles > 500000 then
-            analyze_resources(surface, area, resources)
-        end
+        analyze_area(surface, area)
     end)
 end)
+
+function analyze_area(surface, area)
+    local resources = surface.find_entities_filtered({area = area, type = 'resource'})
+    table.each(resources, increment_resource)
+    increment_tiles(area)
+
+    if #resources > 0 and global.tiles > 500000 then
+        analyze_resources(surface, area, resources)
+    end
+end
 
 function analyze_resources(surface, area, resources)
     Log("Global resource data: %s", serpent.line(global.resources))
@@ -58,7 +80,7 @@ function analyze_resources(surface, area, resources)
         Log("    Resource: %s  -  Discovered: %d", resource_name, discovered)
 
         -- if we have extra of this resource, 'transmute' it into a more useful resource!
-        if discovered > 0 and discovered > desired * 1.5 then
+        if discovered > 0 and discovered / desired > 1.2 then
             -- try and find the resource we have the least of
             local most_needed_resource = most_desired_resource_name(surface, resource_category, 0.8)
             if most_needed_resource then
@@ -77,6 +99,13 @@ function analyze_resources(surface, area, resources)
     end
 end
 
+function get_resource_amount(resource_name)
+    if global.resources and global.resources[resource_name] then
+        return global.resources[resource_name]
+    end
+    return 0
+end
+
 function transmute_ore_patch(surface, new_resource_name, initial_resource_entities)
     local total_amt = 0
     local initial_resource = table.first(initial_resource_entities).name
@@ -85,8 +114,8 @@ function transmute_ore_patch(surface, new_resource_name, initial_resource_entiti
         local amt = resource_entity.amount
         local pos = resource_entity.position
         local force = resource_entity.force
-        global.resources[initial_resource] = global.resources[initial_resource] - amt
-        global.resources[new_resource_name] = global.resources[new_resource_name] + amt
+        global.resources[initial_resource] = get_resource_amount(initial_resource) - amt
+        global.resources[new_resource_name] = get_resource_amount(new_resource_name) + amt
 
         total_amt = total_amt + amt
 
@@ -103,6 +132,9 @@ function most_desired_resource_name(surface, resource_category, min_ratio)
         if game.entity_prototypes[resource_name].resource_category == resource_category then
             local desired_resource_amt = resource_desired_amt(surface, resource_name)
             local discovered_resource_amt = global.resources[resource_name]
+            if not discovered_resource_amt then
+                discovered_resource_amt = 0
+            end
             local fairness_ratio = discovered_resource_amt / desired_resource_amt
             Log("Fairness ratio of resource %s is %s", resource_name, fairness_ratio)
             if fairness_ratio < best_ratio then
@@ -164,13 +196,23 @@ function resource_desired_amt(surface, resource_name)
         return 0
     end
     local fair_ratios = global.fair_rates[resource_name]
+    local total_ratio_number = 0
+    for iter_resource_name, resource_fair_ratios in pairs(global.fair_rates) do
+        local resource_richness = controls[iter_resource_name].richness
+        total_ratio_number = total_ratio_number + resource_fair_ratios[resource_richness]
+    end
     local resource_richness = controls[resource_name].richness
 
     local total_amt = 0
-    for _, resource_amt in pairs(global.resources) do
-        total_amt = total_amt + resource_amt
+    if global.resources then
+        for resource_name, _ in pairs(global.fair_rates) do
+            local resource_amt = global.resources[resource_name]
+            if resource_amt then
+                total_amt = total_amt + resource_amt
+            end
+        end
     end
-    return math.floor(fair_ratios[resource_richness] * total_amt)
+    return math.floor((fair_ratios[resource_richness] / total_ratio_number) * total_amt)
 end
 
 function is_spawn_area(area)
